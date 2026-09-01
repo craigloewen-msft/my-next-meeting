@@ -1,0 +1,10 @@
+# Local virtualenv created by install.sh - platform/machine-specific, never commit
+venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Editor/OS cruft
+.DS_Store
+*.swp

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "craig.next-meeting",
+  "name": "Next Meeting",
+  "version": "1.0.0",
+  "author": "craigloewen-msft",
+  "license": "MIT",
+  "description": "Shows a live countdown to your next Outlook/Microsoft 365 calendar meeting",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Next Meeting",
+    "description": "Countdown to your next Outlook meeting",
+    "category": "Productivity",
+    "defaultSection": "right",
+    "allowMultiple": false
+  }
+}
