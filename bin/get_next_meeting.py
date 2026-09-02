@@ -63,15 +63,37 @@ def load_config():
 # ICS feed backend (no auth)
 # ---------------------------------------------------------------------------
 
+ICS_FETCH_ATTEMPTS = 3
+ICS_FETCH_RETRY_DELAY_SECONDS = 2
+# A bare "python-requests/x.y" UA is occasionally rejected by Office 365's
+# front doors; a normal-looking UA avoids that class of transient block.
+ICS_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) omarchy-next-meeting/1.0"
+
+
 def fetch_next_meeting_ics(ics_url: str):
     import icalendar
     import recurring_ical_events
+    import time
 
-    try:
-        resp = requests.get(ics_url, timeout=15)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        emit({"ok": False, "error": "fetch_error", "detail": str(e)})
+    last_error = None
+    resp = None
+    for attempt in range(1, ICS_FETCH_ATTEMPTS + 1):
+        try:
+            resp = requests.get(
+                ics_url,
+                timeout=15,
+                headers={"User-Agent": ICS_USER_AGENT},
+            )
+            resp.raise_for_status()
+            last_error = None
+            break
+        except requests.RequestException as e:
+            last_error = e
+            if attempt < ICS_FETCH_ATTEMPTS:
+                time.sleep(ICS_FETCH_RETRY_DELAY_SECONDS)
+
+    if last_error is not None:
+        emit({"ok": False, "error": "fetch_error", "detail": str(last_error)})
 
     try:
         calendar = icalendar.Calendar.from_ical(resp.content)

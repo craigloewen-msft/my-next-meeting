@@ -50,6 +50,11 @@ BarWidget {
         : data.error === "fetch_error" ? "fetch-error" : "error"
       root.errorDetail = String(data.detail || data.error || "")
       root.subject = ""
+      // Fetch errors are usually transient (network blip, brief WAF hiccup,
+      // waking from sleep before the network is back) - retry soon instead
+      // of waiting the full poll interval, which would otherwise leave a
+      // stale "Calendar feed error" on the bar for up to 20 minutes.
+      if (root.status === "fetch-error") retryTimer.restart()
       return
     }
 
@@ -134,9 +139,18 @@ BarWidget {
   // Re-poll periodically; recompute the on-screen countdown far more often
   // since it's cheap and purely local (no network call).
   Timer {
-    interval: 180000
+    interval: 1200000
     running: true
     repeat: true
+    onTriggered: root.refresh()
+  }
+
+  // Fast retry after a transient fetch error, instead of waiting up to 20
+  // minutes for the timer above.
+  Timer {
+    id: retryTimer
+    interval: 60000
+    repeat: false
     onTriggered: root.refresh()
   }
 
