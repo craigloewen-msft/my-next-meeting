@@ -7,7 +7,11 @@ or `▶ Standup` while it's happening.
 ## Features
 
 - Live countdown on the bar, ticking every 15s, re-checking your calendar
-  every 3 minutes (or instantly whenever `config.json` changes).
+  every 20 minutes (or instantly whenever `config.json` changes).
+- **Click the widget for the rest of your day** — a popup listing every
+  remaining meeting today with its full title, its start/end clock time, and
+  how long until it starts. Anything already running is called out as
+  in-progress. Middle- or right-click forces an immediate refresh.
 - Two independent, auto-selected backends:
   - **Published ICS calendar link** (recommended) — a plain HTTPS fetch, no
     sign-in at all. Works even when your organization's Conditional Access
@@ -16,14 +20,18 @@ or `▶ Standup` while it's happening.
     "Graph Command Line Tools" client ID, so no Azure app registration is
     required for most people.
 - Skips cancelled events, all-day events, and events marked "Free".
-- Click the widget to force an immediate refresh (or to sign in, if not
-  authenticated yet).
+- Bounded and defensive by construction: every fetch, parse and subprocess
+  runs under an explicit size and time limit, credentials on disk are
+  handled without following symlinks, and error text is redacted before it
+  can reach your screen. See [Security posture](#security-posture).
 
 ## Requirements
 
 - Omarchy with Quickshell plugin support.
 - Python 3.10+ (used only for the polling backend; installed into a private
   virtualenv, no system packages touched).
+- `coreutils` (for `timeout`, used to bound the backend process) — present
+  on any normal Arch/Omarchy system.
 
 ## Installation
 
@@ -44,10 +52,47 @@ git clone https://github.com/craigloewen-msft/my-next-meeting.git \
 omarchy plugin enable craig.next-meeting --section right
 ```
 
-`install.sh` creates a private virtualenv at `venv/` inside the plugin
-folder and installs the Python dependencies (`msal`, `requests`,
-`icalendar`, `recurring-ical-events`) from `requirements.txt`. Nothing is
-installed system-wide.
+### Required post-install setup (do not skip)
+
+**Running `install.sh` is mandatory**, however you installed the plugin.
+The widget shells out to `venv/bin/python` and does nothing else — until
+that virtualenv exists, the bar shows an error instead of a countdown. The
+plugin deliberately never falls back to a system Python, so that what it
+runs is always the exact, verified set of packages installed here.
+
+```bash
+~/.config/omarchy/plugins/craig.next-meeting/install.sh
+```
+
+The script:
+
+- creates a private virtualenv at `venv/` inside the plugin folder (nothing
+  is installed system-wide, and no system packages are touched);
+- installs **only** from `requirements.lock`, which pins every package —
+  direct *and* transitive — to an exact version and a set of SHA-256
+  hashes, using `pip install --require-hashes --no-deps --only-binary :all:`.
+  If any downloaded artifact doesn't match its recorded hash, pip aborts and
+  installs nothing;
+- does **not** upgrade `pip` (an unpinned `pip install --upgrade pip` would
+  pull an unverified package from the live index, which is exactly what the
+  lockfile exists to prevent);
+- finishes with an import check, so a partial install fails loudly at
+  install time rather than silently on the bar later.
+
+Re-run it any time to repair or rebuild the environment; it is idempotent.
+
+#### Updating dependencies
+
+`requirements.txt` is the human-edited *input* (loose lower bounds);
+`requirements.lock` is the generated, hash-pinned artifact that is actually
+installed. After changing `requirements.txt`, regenerate the lock:
+
+```bash
+pip install pip-tools
+pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
+```
+
+Commit both files together, and never hand-edit `requirements.lock`.
 
 ## Configuration
 
@@ -71,16 +116,19 @@ tenants, including Microsoft's own).
    ```json
    { "ics_url": "https://outlook.office365.com/owa/calendar/....ics" }
    ```
-5. Done — the widget picks this up automatically within ~3 minutes (or
-   click it to force a refresh immediately). No sign-in step needed.
+5. Done — the widget picks this up automatically within ~20 minutes, but it
+   also watches `config.json`, so saving the file refreshes the bar right
+   away.
 
 If "Publish a calendar" is greyed out or missing, your org has disabled
 external calendar publishing — use option B instead.
 
 > **Security note:** the published link is a bearer secret — anyone with
 > the URL can read your calendar. Treat `config.json` like a credential
-> file (it's created with your regular user permissions; nothing in this
-> repo transmits it anywhere except directly to Microsoft's servers).
+> file. The plugin stores it in a `0700` directory, reads it as `0600`
+> without following symlinks, sends it only to the host it names over
+> HTTPS, and strips it out of any error message before that message can be
+> shown or logged. See [Security posture](#security-posture).
 
 ### Option B — Microsoft Graph (used automatically if no `ics_url` is set)
 
@@ -110,7 +158,72 @@ override the default client in `config.json`:
 { "client_id": "<Application (client) ID>", "tenant_id": "common" }
 ```
 
+## Using the widget
+
+| Action | Result |
+| --- | --- |
+| Hover | Tooltip with the next meeting's full title and time. |
+| Left click | Opens **today's remaining agenda** — every meeting left today with its full title, clock times, and time until it starts. Click again to close. |
+| Left click (signed out) | Opens a terminal for device-code sign-in instead. |
+| Middle / right click | Forces an immediate refresh. |
+
+The agenda comes down in the same poll as the countdown, so opening it costs
+no extra work and no extra network request. Both the countdown and the
+agenda are recomputed every 15s, so meetings drop off the list as they end,
+without waiting for the next poll.
+
+## Security posture
+
+The calendar URL is a bearer credential and the feed itself is
+attacker-influenced data (anyone who can put a meeting on your calendar
+controls part of it), so the plugin is written to bound and distrust both.
+
+**Credentials on disk** (`bin/secure_io.py`) — `config.json` and the Graph
+token cache are opened relative to a verified `0700` directory descriptor
+with `O_NOFOLLOW`, then checked *on the descriptor* for being a regular
+file, owned by you, with no extra hard links, and within a byte budget.
+Symlinks, FIFOs, foreign owners and oversized files are refused rather than
+followed. The token cache is written exclusively at `0600` to a temporary
+file, fsynced, and atomically renamed into place, so its contents are never
+briefly world-readable and never half-written.
+
+**Network** (`bin/net.py`) — HTTPS is required and redirects are followed
+manually, bounded in number, refused on downgrade to HTTP, and stripped of
+the `Authorization` header when the host changes. Redirect bodies are
+discarded rather than read: `requests` will otherwise buffer a redirect
+response in full inside `Session.send`, before any cap can see it. Responses
+are streamed into a hard byte ceiling (checked against `Content-Length` *and*
+enforced while reading), the content type is validated, and one wall-clock
+deadline covers the whole exchange including retries.
+
+**Untrusted calendar data** (`bin/get_next_meeting.py`) — the raw feed is
+capped in bytes and in `VEVENT` count before parsing. Recurrence rules that
+expand faster than any real meeting ever could — sub-hourly frequencies, and
+hourly ones with no end date — are refused on the raw bytes, before the
+parser sees them, because the expansion itself is the cost. What remains is
+expanded only inside a closed look-ahead window, never open-endedly, and in
+bounded chunks, so the occurrence cap applies to a running total instead of
+to an allocation that already happened. Parsing additionally runs under a
+`SIGALRM` deadline, since a single rule can otherwise spend unbounded time
+inside one iteration and never yield for a clock check. Subjects and error
+details are length-limited before display.
+
+**Error text** — every error path funnels through one redaction step that
+strips URLs with secret paths, `Authorization` headers, and URL userinfo,
+including the bare-path form that `urllib3` uses in connection errors. The
+QML side redacts again before drawing, and the helper's stderr is counted
+but never displayed, since a stray traceback could quote a local variable
+holding the URL.
+
+**The backend process** (`BarWidget.qml`) — the poll is wrapped in
+`timeout`, which signals the whole process group so grandchildren can't
+outlive it, with a QML watchdog behind it escalating TERM → KILL and only
+then releasing the handle. Output is read as a stream, not buffered whole,
+with separate byte ceilings on stdout and stderr, so a runaway helper can't
+grow the shell's memory.
+
 ## Uninstalling
+
 
 ```bash
 omarchy plugin remove craig.next-meeting
@@ -123,15 +236,26 @@ it if you plan to reinstall later.)
 ## How it works / repo layout
 
 - `manifest.json` — Omarchy plugin manifest.
-- `BarWidget.qml` — the bar widget itself: polls the backend script every 3
-  minutes via `Quickshell.Io.Process`, recomputes the on-screen countdown
-  every 15s, and watches `config.json` for instant refresh on change.
+- `BarWidget.qml` — the bar widget itself: polls the backend script every 20
+  minutes via `Quickshell.Io.Process` (under a `timeout` wrapper and a QML
+  watchdog), recomputes the on-screen countdown and today's agenda every
+  15s, draws the click-through agenda popup, and watches `config.json` for
+  instant refresh on change.
 - `bin/get_next_meeting.py` — non-interactive poll script. Always exits 0
   and prints exactly one JSON line so the widget never has to handle a
-  crash. Auto-selects the ICS or Graph backend based on `config.json`.
+  crash. Auto-selects the ICS or Graph backend based on `config.json`, and
+  emits both the next meeting and the rest of today's agenda in that one
+  line.
+- `bin/secure_io.py` — the only path to credential files on disk: verified
+  private directory, no-follow bounded reads, atomic `0600` writes.
+- `bin/net.py` — the only path to the network: HTTPS-only bounded fetches,
+  plus the redaction used on every error string.
 - `bin/test_auth.py` — interactive, one-time device-code sign-in for the
   Graph backend. Never run automatically by the widget.
-- `install.sh` / `requirements.txt` — creates the private virtualenv.
+- `install.sh` — creates the private virtualenv and installs from the lock.
+- `requirements.txt` — human-edited dependency input.
+- `requirements.lock` — generated, hash-pinned, and what is actually
+  installed.
 
 ## License
 

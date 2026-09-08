@@ -1,3 +1,13 @@
+# Human-edited dependency declaration. This file is the INPUT to the lock -
+# it is never installed from directly, because lower bounds resolved against
+# the live index give a different tree on every machine and every day.
+#
+# install.sh installs requirements.lock, which pins these plus their whole
+# transitive closure to exact versions with SHA-256 hashes.
+#
+# After changing anything here, regenerate the lock:
+#   pipx run pip-tools pip-compile --generate-hashes --no-header \
+#       --strip-extras --output-file requirements.lock requirements.txt
 msal>=1.28
 requests>=2.31
 icalendar>=5.0
