@@ -175,19 +175,19 @@ override the default client in `config.json`:
 | Left click (signed out) | Opens a terminal for device-code sign-in instead. |
 | Middle / right click | Forces an immediate refresh. |
 
-The timeline covers midnight to your last meeting, and scales itself to the
-day: a light day is stretched out, while a long one compresses to a minimum
-hour height and then scrolls rather than shrinking into an unreadable
-sliver. That floor is set so a 30-minute meeting — the most common kind —
-still gets a full-height block, and shorter meetings than that never
-disappear either.
+The timeline covers the full calendar day, midnight to midnight, at a fixed
+scale — so 9AM is always the same distance from 10AM, and a block's height
+is always its real duration. That scale is set so a 30-minute meeting — the
+most common kind — still gets a full-height block, and shorter meetings than
+that never disappear either.
 
-Because the whole day is drawn rather than just what's left of it, the view
-usually overflows and scrolls. It opens with "now" about 40% down the
-viewport, so what's next is front and centre with the morning a scroll away;
-a scrollbar on the right and a hint line underneath say which way there's
-more to see. Reopening the popup re-centres on "now", but a refresh while
-it's open will not yank the view out from under you.
+A whole day at a readable scale is much taller than the popup, so the
+timeline scrolls. It opens with "now" about 40% down the viewport, so what's
+next is front and centre with the morning a scroll up and the evening a
+scroll down; a scrollbar on the right and a hint line underneath say which
+way there's more to see. Reopening the popup re-centres on "now", but the
+15s tick and background refreshes will not yank the view out from under you
+while you're reading.
 
 The agenda comes down in the same poll as the countdown, so opening it costs
 no extra work and no extra network request. Both the countdown and the

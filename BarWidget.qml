@@ -318,23 +318,28 @@ BarWidget {
   // ------------------------------------------------------------------
   // Timeline geometry
   //
-  // The popup draws what's left of the day proportionally rather than as a
-  // flat list: in a list a 10-minute gap and a 3-hour gap look identical,
-  // which is exactly the thing you open a day view to find out. Everything
-  // below derives from visibleAgenda, so it re-settles on every tick as
-  // meetings end and drop off.
+  // The popup draws the day proportionally rather than as a flat list: in a
+  // list a 10-minute gap and a 3-hour gap look identical, which is exactly
+  // the thing you open a day view to find out.
+  //
+  // The span is the calendar day - midnight to midnight - not the range the
+  // meetings happen to cover. Fitting the span to the meetings meant the
+  // scale silently rescaled itself every time the day changed shape, and a
+  // day whose meetings spanned six hours compressed to exactly the viewport
+  // height, so there was nothing to scroll and no way to look at the
+  // evening. A fixed day means a fixed scale: 9AM is always the same
+  // distance from 10AM, and the whole day is always reachable.
   // ------------------------------------------------------------------
 
-  // Vertical scale bounds, in pixels per hour. A short day is stretched up
-  // to maxPxPerHour so two back-to-back meetings aren't a smear; a long one
-  // is compressed only as far as minPxPerHour and then scrolls, rather than
-  // shrinking into an unreadable sliver. The floor is set so a 30-minute
-  // meeting - the most common kind - still gets its true height rather than
-  // being padded up to minBlockHeight and overhanging whatever follows it.
+  // Vertical scale bounds, in pixels per hour. The day is far taller than
+  // the viewport at any readable scale, so minPxPerHour is what actually
+  // applies; it is set so a 30-minute meeting - the most common kind -
+  // still gets its true height rather than being padded up to
+  // minBlockHeight and overhanging whatever follows it.
   readonly property int minPxPerHour: Style.space(52)
   readonly property int maxPxPerHour: Style.space(72)
   readonly property int preferredTimelineHeight: Style.space(360)
-  // A 15-minute meeting is ~9px at full scale, which cannot hold a title.
+  // A 15-minute meeting is ~13px at this scale, which cannot hold a title.
   // Short blocks are drawn taller than their true duration and may overhang
   // the next one slightly - the same compromise every calendar app makes.
   readonly property int minBlockHeight: Style.space(26)
@@ -356,28 +361,24 @@ BarWidget {
     return out
   }
 
-  // Top of the timeline: the start of the hour containing the first thing
-  // that happened today, so the morning is visible rather than cropped off
-  // above "now". Falls back to the current hour on an empty day.
+  // Midnight this morning. Built from the calendar date rather than by
+  // subtracting hours, so it stays correct across a DST boundary.
   readonly property double timelineStartMs: {
     void root.nowTick
-    var anchor = Date.now()
-    var items = root.timelineAgenda
-    if (items.length > 0 && items[0].startMs < anchor) anchor = items[0].startMs
-    var hour = new Date(anchor)
-    hour.setMinutes(0, 0, 0)
-    return hour.getTime()
+    var d = new Date()
+    d.setHours(0, 0, 0, 0)
+    return d.getTime()
   }
 
-  // Whole hours spanned. At least two, so a single short meeting still gets
-  // a grid to sit against instead of filling the whole card.
+  // The full day. Extended past 24 only for a meeting running through
+  // midnight, which would otherwise be drawn off the bottom of the day it
+  // belongs to.
   readonly property int timelineHours: {
     void root.nowTick
     var items = root.timelineAgenda
-    var last = Date.now() + 3600000   // always show an hour past now
+    var last = root.timelineStartMs + 24 * 3600000
     for (var i = 0; i < items.length; i++) last = Math.max(last, items[i].endMs)
-    var hours = Math.ceil((last - root.timelineStartMs) / 3600000)
-    return Math.max(2, Math.min(24, hours))
+    return Math.ceil((last - root.timelineStartMs) / 3600000)
   }
 
   readonly property real pxPerHour: {
@@ -830,33 +831,43 @@ BarWidget {
           boundsBehavior: Flickable.StopAtBounds
           interactive: true
 
-          // Open on "now" rather than on the top of the day: the morning is
-          // there to scroll back to, but what's next is what you opened the
+          // Open on "now" rather than at midnight: the small hours are there
+          // to scroll back through, but what's next is what you opened the
           // popup for.
           //
-          // Armed rather than fired once, because at construction the poll
-          // has not returned yet - there is no day to scroll within, and a
-          // scroll against an empty timeline is a no-op that would leave the
-          // view stuck at 8AM once the data landed. So it stays armed until
-          // it lands on real content, then disarms: later refreshes must not
-          // yank the view out from under someone reading their afternoon.
+          // Armed rather than fired once. At construction the timeline has
+          // no height yet - it stays collapsed until the poll returns and
+          // there is a day to draw - and scrolling within a zero-height
+          // viewport is meaningless. So this stays armed until it lands on
+          // real geometry, then disarms: the 15s tick and later refreshes
+          // must not yank the view out from under someone reading their
+          // afternoon.
           property bool pendingScrollToNow: true
 
           function scrollToNow() {
-            if (timelineFlick.contentHeight <= 0 || root.timelineAgenda.length === 0) return
+            if (timelineFlick.height <= 0 || timelineFlick.contentHeight <= 0) return
             var target = popup.nowY - timelineFlick.height * 0.4
             var maxY = Math.max(0, timelineFlick.contentHeight - timelineFlick.height)
             timelineFlick.contentY = Math.max(0, Math.min(maxY, target))
             timelineFlick.pendingScrollToNow = false
           }
 
-          onContentHeightChanged: if (pendingScrollToNow) Qt.callLater(timelineFlick.scrollToNow)
+          function scrollToNowIfPending() {
+            if (timelineFlick.pendingScrollToNow) Qt.callLater(timelineFlick.scrollToNow)
+          }
+
+          // The day is a fixed 24 hours, so contentHeight no longer changes
+          // when the poll lands - height does, when the timeline stops being
+          // collapsed. Watch both, plus the data itself.
+          onHeightChanged: scrollToNowIfPending()
+          onContentHeightChanged: scrollToNowIfPending()
 
           Connections {
             target: root
+            function onTimelineAgendaChanged() { timelineFlick.scrollToNowIfPending() }
             function onPopupOpenChanged() {
               // Re-arm on open so the next look starts at "now" again, even
-              // if it was left scrolled back at yesterday morning.
+              // if it was left scrolled back at breakfast.
               timelineFlick.pendingScrollToNow = true
               if (root.popupOpen) Qt.callLater(timelineFlick.scrollToNow)
             }
