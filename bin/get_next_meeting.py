@@ -6,8 +6,8 @@ Always exits 0 and prints exactly one JSON line, so the QML Process handler
 can parse it unconditionally:
 
   {"ok": true,  "subject": "...", "start": "2024-01-01T12:00:00+00:00",
-   "end": "...", "agenda": [ ... ]}
-  {"ok": true,  "subject": null, "agenda": []}     # nothing upcoming
+   "end": "...", "agenda": [ ... ], "earlier": [ ... ]}
+  {"ok": true,  "subject": null, "agenda": [], "earlier": [ ... ]}  # nothing upcoming
   {"ok": false, "error": "not_authenticated"}      # (Graph mode) run test_auth.py first
   {"ok": false, "error": "blocked_by_org"}         # (Graph mode) org policy blocked sign-in
   {"ok": false, "error": "config_error", "detail": "..."}
@@ -16,10 +16,13 @@ can parse it unconditionally:
 
 ``agenda`` is every meeting still to come *today* in the local timezone -
 including one already in progress - each with its full (untruncated by
-display concerns) subject, start, and end. The widget renders it in a
-popup when you click the bar item; putting it in the same JSON line as the
-countdown means opening that popup costs nothing, because the data is
-already on hand from the regular poll.
+display concerns) subject, start, and end. ``earlier`` is the same shape,
+for the meetings that already finished today: the popup draws the day as a
+timeline, so it needs the morning as well as what's left. Only ``agenda``
+counts as "upcoming" - nothing counts down to an ``earlier`` entry. The
+widget renders both in a popup when you click the bar item; putting them in
+the same JSON line as the countdown means opening that popup costs nothing,
+because the data is already on hand from the regular poll.
 
 Two independent backends, picked automatically based on config.json:
 
@@ -185,6 +188,17 @@ def clean_subject(raw):
     return text
 
 
+def local_day_start(now):
+    """
+    Local midnight at the start of today, as an aware (comparable) value.
+
+    Same DST reasoning as local_day_end(): build from the local calendar
+    date rather than by subtracting from a fixed-offset datetime.
+    """
+    local_now = now.astimezone()
+    return datetime.combine(local_now.date(), dtime.min).astimezone()
+
+
 def local_day_end(now):
     """
     Local midnight at the end of today, as an aware (comparable) value.
@@ -206,14 +220,33 @@ def build_payload(candidates, now):
     ``candidates`` need not be sorted and may contain events that already
     ended; both are handled here so the two backends don't each have to.
     """
+    day_start = local_day_start(now)
+    day_end = local_day_end(now)
+
+    # Meetings that already finished today. The widget never counts these
+    # or counts down to them - they exist only so the popup can draw the
+    # whole day, instead of a timeline that begins wherever "now" happens
+    # to be and hides the morning you're trying to look back at.
+    earlier = [
+        {
+            "subject": subject,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "inProgress": False,
+        }
+        for start, end, subject in sorted(
+            (c for c in candidates if c[1] <= now and c[0] >= day_start),
+            key=lambda c: (c[0], c[1]),
+        )
+    ][-MAX_AGENDA_ITEMS:]
+
     upcoming = sorted(
         (c for c in candidates if c[1] > now),
         key=lambda c: (c[0], c[1]),
     )
     if not upcoming:
-        return {"ok": True, "subject": None, "agenda": []}
+        return {"ok": True, "subject": None, "agenda": [], "earlier": earlier}
 
-    day_end = local_day_end(now)
     agenda = [
         {
             "subject": subject,
@@ -232,6 +265,7 @@ def build_payload(candidates, now):
         "start": start.isoformat(),
         "end": end.isoformat(),
         "agenda": agenda,
+        "earlier": earlier,
     }
 
 
@@ -362,10 +396,14 @@ def parse_ics(body: bytes):
             # security review asked for: the work is a function of the window
             # we chose, not of how far a hostile RRULE reaches.
             for days in LOOKAHEAD_STEPS:
-                candidates = _expand_window(query, now, now + timedelta(days=days))
+                candidates = _expand_window(
+                    query, local_day_start(now), now + timedelta(days=days))
                 # The first window that turns anything up wins: the nearest
                 # meeting cannot be further out than the window that found it.
-                if candidates:
+                # Judged on *upcoming* hits only - the window now reaches back
+                # to this morning for the timeline, and already-finished
+                # meetings must not stop the search for the next one.
+                if any(c[1] > now for c in candidates):
                     break
     except ParseTimeout as e:
         emit_error("fetch_error", str(e))
@@ -402,9 +440,9 @@ def _screen_recurrence_rules(body: bytes):
             )
 
 
-def _expand_window(query, now, window_end):
+def _expand_window(query, window_start, window_end):
     """
-    Expand ``[now, window_end)`` in chunks, enforcing MAX_OCCURRENCES.
+    Expand ``[window_start, window_end)`` in chunks, enforcing MAX_OCCURRENCES.
 
     between() builds its entire result list - and converts every occurrence
     into a component - before it returns, so slicing what comes back caps
@@ -415,7 +453,7 @@ def _expand_window(query, now, window_end):
     candidates = []
     seen = set()
     total = 0
-    chunk_start = now
+    chunk_start = window_start
 
     while chunk_start < window_end:
         chunk_end = min(chunk_start + timedelta(days=CHUNK_DAYS), window_end)
@@ -427,7 +465,7 @@ def _expand_window(query, now, window_end):
                     f"Calendar expands to more than {MAX_OCCURRENCES} "
                     "occurrences in the window checked",
                 )
-            record = _ics_record(ev, now)
+            record = _ics_record(ev, window_start)
             # An event straddling a chunk boundary is returned by both
             # chunks; the tuple is exactly what the payload is built from,
             # so deduplicating on it is sufficient.
@@ -439,8 +477,14 @@ def _expand_window(query, now, window_end):
     return candidates
 
 
-def _ics_record(ev, now):
-    """Normalise one occurrence, or None if it should be ignored."""
+def _ics_record(ev, cutoff):
+    """
+    Normalise one occurrence, or None if it should be ignored.
+
+    ``cutoff`` is the start of the expansion window, not "now": the window
+    reaches back to local midnight so the popup can draw the whole day, and
+    build_payload() is what decides which of those are still upcoming.
+    """
     if str(ev.get("STATUS", "")).upper() == "CANCELLED":
         return None
     if str(ev.get("TRANSP", "")).upper() == "TRANSPARENT":  # "Free" in Outlook
@@ -465,7 +509,7 @@ def _ics_record(ev, now):
     if end < start:
         end = start
 
-    if end < now:
+    if end < cutoff:
         return None
     return start, end, clean_subject(ev.get("SUMMARY", ""))
 
@@ -531,6 +575,10 @@ def get_token_silent(client_id: str, tenant_id: str):
 
 def run_graph_backend(token: str):
     now = datetime.now(timezone.utc)
+    # Reach back to local midnight, not to "now": the popup timeline draws
+    # the whole day, so meetings that already finished today still have to
+    # come down. build_payload() separates them from what's upcoming.
+    window_start = local_day_start(now).astimezone(timezone.utc)
     window_end = now + timedelta(days=WINDOW_DAYS)
     try:
         body, _ = net.fetch(
@@ -542,7 +590,7 @@ def run_graph_backend(token: str):
                 "Prefer": 'outlook.timezone="UTC"',
             },
             params={
-                "startDateTime": now.strftime("%Y-%m-%dT%H:%M:%S"),
+                "startDateTime": window_start.strftime("%Y-%m-%dT%H:%M:%S"),
                 "endDateTime": window_end.strftime("%Y-%m-%dT%H:%M:%S"),
                 "$select": "subject,start,end,isCancelled,showAs,isAllDay",
                 "$orderby": "start/dateTime",

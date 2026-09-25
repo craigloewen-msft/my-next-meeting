@@ -79,6 +79,10 @@ BarWidget {
   property string endIso: ""
   property string errorDetail: ""
   property var agenda: []
+  // Today's already-finished meetings. Never counted or counted down to;
+  // they exist so the popup can draw the whole day rather than starting
+  // the timeline at whatever time you happened to open it.
+  property var earlier: []
   property double lastUpdatedMs: 0
   property int nowTick: 0
   property bool popupOpen: false
@@ -241,6 +245,7 @@ BarWidget {
     }
 
     root.agenda = root.sanitizeAgenda(data.agenda)
+    root.earlier = root.sanitizeAgenda(data.earlier)
 
     if (!data.subject) {
       root.status = "no-meeting"
@@ -323,8 +328,10 @@ BarWidget {
   // Vertical scale bounds, in pixels per hour. A short day is stretched up
   // to maxPxPerHour so two back-to-back meetings aren't a smear; a long one
   // is compressed only as far as minPxPerHour and then scrolls, rather than
-  // shrinking into an unreadable sliver.
-  readonly property int minPxPerHour: Style.space(34)
+  // shrinking into an unreadable sliver. The floor is set so a 30-minute
+  // meeting - the most common kind - still gets its true height rather than
+  // being padded up to minBlockHeight and overhanging whatever follows it.
+  readonly property int minPxPerHour: Style.space(52)
   readonly property int maxPxPerHour: Style.space(72)
   readonly property int preferredTimelineHeight: Style.space(360)
   // A 15-minute meeting is ~9px at full scale, which cannot hold a title.
@@ -332,12 +339,30 @@ BarWidget {
   // the next one slightly - the same compromise every calendar app makes.
   readonly property int minBlockHeight: Style.space(26)
 
-  // Top of the timeline: the start of the hour containing the earliest of
-  // "now" and the meeting currently in progress (which began before now).
+  // Everything the timeline draws: today's finished meetings followed by
+  // what's left, in start order. visibleAgenda stays the "what's upcoming"
+  // model that the bar and the counts use - this is purely the day view.
+  readonly property var timelineAgenda: {
+    void root.nowTick
+    var now = Date.now()
+    var out = []
+    var i
+    for (i = 0; i < root.earlier.length; i++) {
+      if (root.earlier[i].endMs <= now) out.push(root.earlier[i])
+    }
+    var live = root.visibleAgenda
+    for (i = 0; i < live.length; i++) out.push(live[i])
+    out.sort(function (a, b) { return a.startMs - b.startMs || a.endMs - b.endMs })
+    return out
+  }
+
+  // Top of the timeline: the start of the hour containing the first thing
+  // that happened today, so the morning is visible rather than cropped off
+  // above "now". Falls back to the current hour on an empty day.
   readonly property double timelineStartMs: {
     void root.nowTick
     var anchor = Date.now()
-    var items = root.visibleAgenda
+    var items = root.timelineAgenda
     if (items.length > 0 && items[0].startMs < anchor) anchor = items[0].startMs
     var hour = new Date(anchor)
     hour.setMinutes(0, 0, 0)
@@ -348,7 +373,7 @@ BarWidget {
   // a grid to sit against instead of filling the whole card.
   readonly property int timelineHours: {
     void root.nowTick
-    var items = root.visibleAgenda
+    var items = root.timelineAgenda
     var last = Date.now() + 3600000   // always show an hour past now
     for (var i = 0; i < items.length; i++) last = Math.max(last, items[i].endMs)
     var hours = Math.ceil((last - root.timelineStartMs) / 3600000)
@@ -374,7 +399,8 @@ BarWidget {
   // as one meeting.
   readonly property var timelineBlocks: {
     void root.nowTick
-    var items = root.visibleAgenda   // already sorted by start
+    var now = Date.now()
+    var items = root.timelineAgenda   // already sorted by start
     var out = []
     var i = 0
     while (i < items.length) {
@@ -401,6 +427,7 @@ BarWidget {
           subject: items[k].subject,
           startMs: items[k].startMs,
           endMs: items[k].endMs,
+          past: items[k].endMs <= now,
           column: column
         })
       }
@@ -777,8 +804,13 @@ BarWidget {
       Item {
         id: timeline
         width: parent.width
-        visible: root.visibleAgenda.length > 0
+        visible: root.timelineAgenda.length > 0
         height: visible ? root.timelineViewHeight : 0
+
+        // The block the pointer is over, or null. Drives the detail card
+        // below: a 30-minute block is only ~30px tall, which cannot hold a
+        // full title plus times, so hovering is how you read the rest.
+        property var hoveredBlock: null
 
         // Not laid out - it exists only to measure the hour gutter.
         TextMetrics {
@@ -791,11 +823,45 @@ BarWidget {
         Flickable {
           id: timelineFlick
           anchors.fill: parent
+          anchors.rightMargin: Style.space(6)
           contentWidth: width
           contentHeight: root.timelineHeight
           clip: true
           boundsBehavior: Flickable.StopAtBounds
-          interactive: contentHeight > height
+          interactive: true
+
+          // Open on "now" rather than on the top of the day: the morning is
+          // there to scroll back to, but what's next is what you opened the
+          // popup for.
+          //
+          // Armed rather than fired once, because at construction the poll
+          // has not returned yet - there is no day to scroll within, and a
+          // scroll against an empty timeline is a no-op that would leave the
+          // view stuck at 8AM once the data landed. So it stays armed until
+          // it lands on real content, then disarms: later refreshes must not
+          // yank the view out from under someone reading their afternoon.
+          property bool pendingScrollToNow: true
+
+          function scrollToNow() {
+            if (timelineFlick.contentHeight <= 0 || root.timelineAgenda.length === 0) return
+            var target = popup.nowY - timelineFlick.height * 0.4
+            var maxY = Math.max(0, timelineFlick.contentHeight - timelineFlick.height)
+            timelineFlick.contentY = Math.max(0, Math.min(maxY, target))
+            timelineFlick.pendingScrollToNow = false
+          }
+
+          onContentHeightChanged: if (pendingScrollToNow) Qt.callLater(timelineFlick.scrollToNow)
+
+          Connections {
+            target: root
+            function onPopupOpenChanged() {
+              // Re-arm on open so the next look starts at "now" again, even
+              // if it was left scrolled back at yesterday morning.
+              timelineFlick.pendingScrollToNow = true
+              if (root.popupOpen) Qt.callLater(timelineFlick.scrollToNow)
+            }
+          }
+          Component.onCompleted: Qt.callLater(timelineFlick.scrollToNow)
 
           Item {
             id: timelineBody
@@ -871,6 +937,9 @@ BarWidget {
                   return now >= block.modelData.startMs && now < block.modelData.endMs
                 }
 
+                readonly property bool past: block.modelData.past === true
+                readonly property bool hovered: timeline.hoveredBlock === block.modelData
+
                 readonly property real slotWidth:
                   (timelineBody.width - popup.gutterWidth) / Math.max(1, block.modelData.columns)
                 readonly property real trueHeight:
@@ -880,15 +949,33 @@ BarWidget {
                 width: Math.max(Style.space(40), block.slotWidth - Style.space(4))
                 y: Math.max(0, root.timelineY(block.modelData.startMs))
                 height: Math.max(root.minBlockHeight, block.trueHeight - Style.space(2))
-                z: 1
+                z: block.hovered ? 2 : 1
                 radius: Style.space(4)
                 clip: true
+                opacity: block.past ? 0.55 : 1.0
                 // Tinted rather than translucent: a see-through block would
                 // let the hour grid and the "now" rule underneath show up as
                 // lines drawn across the meeting's own title.
                 color: block.live
                   ? Qt.tint(popup.surface, Qt.rgba(popup.accent.r, popup.accent.g, popup.accent.b, 0.22))
                   : Qt.tint(popup.surface, Qt.rgba(popup.fg.r, popup.fg.g, popup.fg.b, 0.09))
+                // Back-to-back meetings are only separated by a 2px gap, and
+                // with identical fills that reads as one tall block. The
+                // outline is what makes "two meetings" unambiguous.
+                border.width: 1
+                border.color: block.hovered
+                  ? Qt.rgba(popup.fg.r, popup.fg.g, popup.fg.b, 0.55)
+                  : (block.live
+                     ? Qt.rgba(popup.accent.r, popup.accent.g, popup.accent.b, 0.55)
+                     : Qt.rgba(popup.fg.r, popup.fg.g, popup.fg.b, 0.18))
+
+                HoverHandler {
+                  id: blockHover
+                  onHoveredChanged: {
+                    if (blockHover.hovered) timeline.hoveredBlock = block.modelData
+                    else if (timeline.hoveredBlock === block.modelData) timeline.hoveredBlock = null
+                  }
+                }
 
                 // Left edge stripe, the one part that stays legible when a
                 // block is squeezed down to minBlockHeight.
@@ -978,18 +1065,90 @@ BarWidget {
             }
           }
         }
+
+        // Scroll position indicator. The timeline now covers the whole day,
+        // so it usually overflows - without a visible handle there's nothing
+        // to say the morning is still up there.
+        Rectangle {
+          visible: timelineFlick.contentHeight > timelineFlick.height + 1
+          width: Style.space(3)
+          radius: width / 2
+          x: timeline.width - width
+          y: timelineFlick.contentHeight > 0
+            ? (timelineFlick.contentY / timelineFlick.contentHeight) * timeline.height
+            : 0
+          height: timelineFlick.contentHeight > 0
+            ? Math.max(Style.space(18),
+                       (timelineFlick.height / timelineFlick.contentHeight) * timeline.height)
+            : 0
+          color: Qt.rgba(popup.fg.r, popup.fg.g, popup.fg.b, 0.28)
+        }
       }
 
-      // The timeline is height-capped so a heavy day can't grow the card off
-      // the screen, which means the last visible block is often cut
-      // mid-title. Say so explicitly rather than leaving a half-drawn row to
-      // be interpreted as a rendering bug.
+      // Hover detail. A 30-minute meeting is ~30px tall, so its block can
+      // only ever show a clipped title - this is where the whole thing is
+      // readable. Reserves its height even when empty so hovering across
+      // the timeline doesn't make the card jump around under the pointer.
+      Item {
+        width: parent.width
+        visible: timeline.visible
+        height: visible ? Math.max(hoverDetail.implicitHeight, Style.space(34)) : 0
+
+        Column {
+          id: hoverDetail
+          width: parent.width
+          spacing: Style.space(1)
+          opacity: timeline.hoveredBlock ? 1 : 0.45
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: timeline.hoveredBlock
+              ? timeline.hoveredBlock.subject
+              : "Hover a meeting for details"
+            color: timeline.hoveredBlock ? popup.fg : popup.dim
+            font.family: popup.face
+            font.pixelSize: Style.font.bodySmall
+            font.bold: timeline.hoveredBlock !== null
+            wrapMode: Text.WordWrap
+            maximumLineCount: 3
+            elide: Text.ElideRight
+          }
+
+          Text {
+            width: parent.width
+            visible: timeline.hoveredBlock !== null
+            textFormat: Text.PlainText
+            text: {
+              void root.nowTick
+              var b = timeline.hoveredBlock
+              if (!b) return ""
+              return root.clockRange(b.startMs, b.endMs) +
+                "  ·  " + root.formatDuration(b.endMs - b.startMs) +
+                "  ·  " + root.formatLead(b.startMs, b.endMs, Date.now())
+            }
+            color: popup.dim
+            font.family: popup.face
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+        }
+      }
+
+      // The timeline covers the whole day but is height-capped so a heavy
+      // day can't grow the card off the screen. Say which way there's more
+      // to see, rather than leaving a half-drawn block to be read as a
+      // rendering bug.
       Text {
         width: parent.width
-        visible: timeline.visible && timelineFlick.contentHeight > timelineFlick.height
+        visible: timeline.visible && timelineFlick.contentHeight > timelineFlick.height + 1
         horizontalAlignment: Text.AlignHCenter
         textFormat: Text.PlainText
-        text: timelineFlick.atYEnd ? "⌃  scroll up for earlier" : "⌄  scroll for later"
+        text: {
+          if (timelineFlick.atYBeginning) return "↓  scroll for later"
+          if (timelineFlick.atYEnd) return "↑  scroll back to earlier today"
+          return "↕  scroll for earlier and later"
+        }
         color: popup.dim
         font.family: popup.face
         font.pixelSize: Style.font.bodySmall
