@@ -311,6 +311,109 @@ BarWidget {
   }
 
   // ------------------------------------------------------------------
+  // Timeline geometry
+  //
+  // The popup draws what's left of the day proportionally rather than as a
+  // flat list: in a list a 10-minute gap and a 3-hour gap look identical,
+  // which is exactly the thing you open a day view to find out. Everything
+  // below derives from visibleAgenda, so it re-settles on every tick as
+  // meetings end and drop off.
+  // ------------------------------------------------------------------
+
+  // Vertical scale bounds, in pixels per hour. A short day is stretched up
+  // to maxPxPerHour so two back-to-back meetings aren't a smear; a long one
+  // is compressed only as far as minPxPerHour and then scrolls, rather than
+  // shrinking into an unreadable sliver.
+  readonly property int minPxPerHour: Style.space(34)
+  readonly property int maxPxPerHour: Style.space(72)
+  readonly property int preferredTimelineHeight: Style.space(360)
+  // A 15-minute meeting is ~9px at full scale, which cannot hold a title.
+  // Short blocks are drawn taller than their true duration and may overhang
+  // the next one slightly - the same compromise every calendar app makes.
+  readonly property int minBlockHeight: Style.space(26)
+
+  // Top of the timeline: the start of the hour containing the earliest of
+  // "now" and the meeting currently in progress (which began before now).
+  readonly property double timelineStartMs: {
+    void root.nowTick
+    var anchor = Date.now()
+    var items = root.visibleAgenda
+    if (items.length > 0 && items[0].startMs < anchor) anchor = items[0].startMs
+    var hour = new Date(anchor)
+    hour.setMinutes(0, 0, 0)
+    return hour.getTime()
+  }
+
+  // Whole hours spanned. At least two, so a single short meeting still gets
+  // a grid to sit against instead of filling the whole card.
+  readonly property int timelineHours: {
+    void root.nowTick
+    var items = root.visibleAgenda
+    var last = Date.now() + 3600000   // always show an hour past now
+    for (var i = 0; i < items.length; i++) last = Math.max(last, items[i].endMs)
+    var hours = Math.ceil((last - root.timelineStartMs) / 3600000)
+    return Math.max(2, Math.min(24, hours))
+  }
+
+  readonly property real pxPerHour: {
+    var fit = root.preferredTimelineHeight / Math.max(1, root.timelineHours)
+    return Math.max(root.minPxPerHour, Math.min(root.maxPxPerHour, fit))
+  }
+
+  readonly property int timelineHeight: Math.round(root.timelineHours * root.pxPerHour)
+  readonly property int timelineViewHeight: Math.min(root.timelineHeight, root.preferredTimelineHeight)
+
+  function timelineY(ms) {
+    return ((ms - root.timelineStartMs) / 3600000) * root.pxPerHour
+  }
+
+  // Meetings placed into side-by-side columns where they overlap: a run of
+  // transitively overlapping meetings forms a cluster, and each one takes
+  // the leftmost column that is free at its start. Without this, a
+  // double-booked hour would draw two blocks on top of each other and read
+  // as one meeting.
+  readonly property var timelineBlocks: {
+    void root.nowTick
+    var items = root.visibleAgenda   // already sorted by start
+    var out = []
+    var i = 0
+    while (i < items.length) {
+      var clusterEnd = items[i].endMs
+      var j = i + 1
+      while (j < items.length && items[j].startMs < clusterEnd) {
+        clusterEnd = Math.max(clusterEnd, items[j].endMs)
+        j++
+      }
+      var columnEnds = []
+      var cluster = []
+      for (var k = i; k < j; k++) {
+        var column = -1
+        for (var c = 0; c < columnEnds.length; c++) {
+          if (items[k].startMs >= columnEnds[c]) { column = c; break }
+        }
+        if (column < 0) {
+          columnEnds.push(items[k].endMs)
+          column = columnEnds.length - 1
+        } else {
+          columnEnds[column] = items[k].endMs
+        }
+        cluster.push({
+          subject: items[k].subject,
+          startMs: items[k].startMs,
+          endMs: items[k].endMs,
+          column: column
+        })
+      }
+      for (var p = 0; p < cluster.length; p++) {
+        cluster[p].columns = columnEnds.length
+        out.push(cluster[p])
+      }
+      i = j
+    }
+    return out
+  }
+
+  // ------------------------------------------------------------------
   // Formatting
   // ------------------------------------------------------------------
 
@@ -344,6 +447,10 @@ BarWidget {
     var end = new Date(endMs)
     return start.toLocaleTimeString(Qt.locale(), Locale.ShortFormat) + " – " +
       end.toLocaleTimeString(Qt.locale(), Locale.ShortFormat)
+  }
+
+  function clockAt(ms) {
+    return new Date(ms).toLocaleTimeString(Qt.locale(), Locale.ShortFormat)
   }
 
   readonly property string displayText: {
@@ -568,11 +675,25 @@ BarWidget {
     bar: root.bar
     owner: root
     open: root.popupOpen
-    contentWidth: popup.fittedContentWidth(Style.space(340))
+    contentWidth: popup.fittedContentWidth(Style.space(400))
     contentHeight: popup.fittedContentHeight(column.implicitHeight)
 
+    readonly property color fg: root.bar ? root.bar.foreground : Color.foreground
+    readonly property color accent: Color.accent
+    readonly property color urgent: root.bar ? root.bar.urgent : Color.urgent
     readonly property color dim: root.bar ? Qt.darker(root.bar.foreground, 1.4) : Color.foreground
+    readonly property color surface: Color.popups.background
     readonly property string face: root.bar ? root.bar.fontFamily : Style.font.family
+
+    // Width of the hour-label column. Sized from the widest label the locale
+    // can produce rather than the current one, so the grid doesn't shift
+    // sideways as the day crosses from "9:00 AM" to "10:00 AM".
+    readonly property int gutterWidth: hourMetrics.width + Style.space(10)
+
+    readonly property real nowY: {
+      void root.nowTick
+      return root.timelineY(Date.now())
+    }
 
     Column {
       id: column
@@ -649,90 +770,226 @@ BarWidget {
         wrapMode: Text.WordWrap
       }
 
-      // The list itself. Capped and clipped so a 20-meeting day scrolls
-      // rather than growing a popup taller than the screen.
+      // The day itself. A proportional timeline: hour gridlines down the
+      // left, each meeting a block whose height is its real duration, and a
+      // marker for where "now" sits - so gaps, overlaps and back-to-backs
+      // are visible at a glance instead of being inferred from clock times.
       Item {
+        id: timeline
         width: parent.width
         visible: root.visibleAgenda.length > 0
-        height: visible ? Math.min(list.contentHeight, Style.space(340)) : 0
+        height: visible ? root.timelineViewHeight : 0
 
-        ListView {
-          id: list
+        // Not laid out - it exists only to measure the hour gutter.
+        TextMetrics {
+          id: hourMetrics
+          font.family: popup.face
+          font.pixelSize: Style.font.caption
+          text: new Date(2000, 0, 1, 22, 0).toLocaleTimeString(Qt.locale(), Locale.ShortFormat)
+        }
+
+        Flickable {
+          id: timelineFlick
           anchors.fill: parent
-          model: root.visibleAgenda
+          contentWidth: width
+          contentHeight: root.timelineHeight
           clip: true
-          spacing: Style.space(10)
           boundsBehavior: Flickable.StopAtBounds
           interactive: contentHeight > height
 
-          delegate: Column {
-            id: entry
-            required property var modelData
-            width: list.width
-            spacing: Style.space(2)
+          Item {
+            id: timelineBody
+            width: timelineFlick.width
+            height: root.timelineHeight
 
-            readonly property bool live: {
-              void root.nowTick
-              var now = Date.now()
-              return now >= entry.modelData.startMs && now < entry.modelData.endMs
+            // Hour grid. One extra line closes off the bottom of the last
+            // hour; it gets no label, since its label would sit past the
+            // end of the content.
+            Repeater {
+              model: root.timelineHours + 1
+
+              delegate: Item {
+                id: hourRow
+                required property int index
+                y: hourRow.index * root.pxPerHour
+                width: timelineBody.width
+                height: 1
+
+                readonly property double hourMs: root.timelineStartMs + hourRow.index * 3600000
+
+                Rectangle {
+                  x: popup.gutterWidth
+                  width: parent.width - x
+                  height: Math.max(1, Style.space(1))
+                  color: Qt.rgba(popup.fg.r, popup.fg.g, popup.fg.b, 0.16)
+                }
+
+                Text {
+                  id: hourLabel
+                  y: Style.space(2)
+                  width: popup.gutterWidth - Style.space(6)
+                  horizontalAlignment: Text.AlignRight
+                  visible: hourRow.index < root.timelineHours
+                  // Yield to the "now" label when the two would physically
+                  // overlap, rather than drawing two times on top of each
+                  // other. Compared as real label boxes, since the hour label
+                  // hangs below its line while the now label straddles its own.
+                  opacity: (hourRow.y + hourLabel.y < popup.nowY + hourMetrics.height / 2
+                            && hourRow.y + hourLabel.y + hourMetrics.height > popup.nowY - hourMetrics.height / 2)
+                    ? 0 : 1
+                  textFormat: Text.PlainText
+                  text: root.clockAt(hourRow.hourMs)
+                  color: popup.dim
+                  font.family: popup.face
+                  font.pixelSize: Style.font.caption
+                }
+              }
             }
 
-            Row {
-              width: parent.width
-              spacing: Style.space(6)
+            // The "now" rule. Kept below the meeting blocks (which carry
+            // z: 1) so it reads as a background gridline marking the gaps
+            // you're between, rather than striking through the title of the
+            // meeting you're in - that one already has its own highlight.
+            Rectangle {
+              x: popup.gutterWidth
+              width: timelineBody.width - x
+              height: Math.max(1, Style.space(1))
+              y: popup.nowY - height / 2
+              color: popup.urgent
+            }
 
-              Text {
-                id: marker
-                textFormat: Text.PlainText
-                // Filled dot for the meeting you're in, hollow for the rest.
-                text: entry.live ? "●" : "○"
-                color: root.bar ? root.bar.foreground : Color.foreground
-                font.family: popup.face
-                font.pixelSize: Style.font.bodySmall
-              }
+            Repeater {
+              model: root.timelineBlocks
 
-              Text {
-                width: parent.width - marker.implicitWidth - Style.space(6)
-                textFormat: Text.PlainText
-                // Full title - truncation is the bar label's job, not this
-                // popup's; seeing the whole subject is the point of opening it.
-                text: entry.modelData.subject
-                color: root.bar ? root.bar.foreground : Color.foreground
-                font.family: popup.face
-                font.pixelSize: Style.font.body
-                font.bold: entry.live
-                wrapMode: Text.WordWrap
+              delegate: Rectangle {
+                id: block
+                required property var modelData
+
+                readonly property bool live: {
+                  void root.nowTick
+                  var now = Date.now()
+                  return now >= block.modelData.startMs && now < block.modelData.endMs
+                }
+
+                readonly property real slotWidth:
+                  (timelineBody.width - popup.gutterWidth) / Math.max(1, block.modelData.columns)
+                readonly property real trueHeight:
+                  root.timelineY(block.modelData.endMs) - root.timelineY(block.modelData.startMs)
+
+                x: popup.gutterWidth + block.modelData.column * block.slotWidth
+                width: Math.max(Style.space(40), block.slotWidth - Style.space(4))
+                y: Math.max(0, root.timelineY(block.modelData.startMs))
+                height: Math.max(root.minBlockHeight, block.trueHeight - Style.space(2))
+                z: 1
+                radius: Style.space(4)
+                clip: true
+                // Tinted rather than translucent: a see-through block would
+                // let the hour grid and the "now" rule underneath show up as
+                // lines drawn across the meeting's own title.
+                color: block.live
+                  ? Qt.tint(popup.surface, Qt.rgba(popup.accent.r, popup.accent.g, popup.accent.b, 0.22))
+                  : Qt.tint(popup.surface, Qt.rgba(popup.fg.r, popup.fg.g, popup.fg.b, 0.09))
+
+                // Left edge stripe, the one part that stays legible when a
+                // block is squeezed down to minBlockHeight.
+                Rectangle {
+                  width: Style.space(3)
+                  height: parent.height
+                  radius: Style.space(2)
+                  color: block.live ? popup.urgent : Qt.rgba(popup.fg.r, popup.fg.g, popup.fg.b, 0.45)
+                }
+
+                Column {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(9)
+                  anchors.rightMargin: Style.space(6)
+                  anchors.topMargin: Style.space(3)
+                  anchors.bottomMargin: Style.space(3)
+                  spacing: Style.space(1)
+
+                  Text {
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    text: block.modelData.subject
+                    color: popup.fg
+                    font.family: popup.face
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: block.live
+                    // A block is only as tall as its meeting is long, so the
+                    // title wraps where there's room for it and elides where
+                    // there isn't, instead of overflowing into the next one.
+                    maximumLineCount: Math.max(1, Math.floor(
+                      (block.height - Style.space(6)) / (Style.font.bodySmall * 1.35)) - 1)
+                    wrapMode: Text.WordWrap
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    visible: block.height >= root.minBlockHeight + Style.space(12)
+                    textFormat: Text.PlainText
+                    text: {
+                      void root.nowTick
+                      return root.clockRange(block.modelData.startMs, block.modelData.endMs) +
+                        "  ·  " + root.formatLead(block.modelData.startMs, block.modelData.endMs, Date.now())
+                    }
+                    color: popup.dim
+                    font.family: popup.face
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+                }
               }
             }
 
-            Text {
-              x: marker.implicitWidth + Style.space(6)
-              width: parent.width - x
-              textFormat: Text.PlainText
-              text: {
-                void root.nowTick
-                return root.clockRange(entry.modelData.startMs, entry.modelData.endMs) + "  ·  " +
-                  root.formatLead(entry.modelData.startMs, entry.modelData.endMs, Date.now())
+            // Where you are in the day. Only the gutter half sits above the
+            // blocks - the gutter is always empty, so this can never cover a
+            // meeting title the way a full-width rule would.
+            Item {
+              id: nowMarker
+              width: popup.gutterWidth
+              height: Math.max(hourMetrics.height, Style.space(8))
+              y: popup.nowY - height / 2
+              z: 10
+
+              Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                x: parent.width - width
+                width: Style.space(6)
+                height: width
+                radius: width / 2
+                color: popup.urgent
               }
-              color: popup.dim
-              font.family: popup.face
-              font.pixelSize: Style.font.bodySmall
-              elide: Text.ElideRight
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: popup.gutterWidth - Style.space(9)
+                horizontalAlignment: Text.AlignRight
+                textFormat: Text.PlainText
+                text: {
+                  void root.nowTick
+                  return root.clockAt(Date.now())
+                }
+                color: popup.urgent
+                font.family: popup.face
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
             }
           }
         }
       }
 
-      // The list is height-capped so a heavy day can't grow the card off the
-      // screen, which means the last visible row is often cut mid-sentence.
-      // Say so explicitly rather than leaving a half-drawn line to be
-      // interpreted as a rendering bug.
+      // The timeline is height-capped so a heavy day can't grow the card off
+      // the screen, which means the last visible block is often cut
+      // mid-title. Say so explicitly rather than leaving a half-drawn row to
+      // be interpreted as a rendering bug.
       Text {
         width: parent.width
-        visible: list.contentHeight > list.height
+        visible: timeline.visible && timelineFlick.contentHeight > timelineFlick.height
         horizontalAlignment: Text.AlignHCenter
         textFormat: Text.PlainText
-        text: list.atYEnd ? "⌃  scroll up for earlier" : "⌄  scroll for more"
+        text: timelineFlick.atYEnd ? "⌃  scroll up for earlier" : "⌄  scroll for later"
         color: popup.dim
         font.family: popup.face
         font.pixelSize: Style.font.bodySmall

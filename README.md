@@ -8,10 +8,12 @@ or `▶ Standup` while it's happening.
 
 - Live countdown on the bar, ticking every 15s, re-checking your calendar
   every 20 minutes (or instantly whenever `config.json` changes).
-- **Click the widget for the rest of your day** — a popup listing every
-  remaining meeting today with its full title, its start/end clock time, and
-  how long until it starts. Anything already running is called out as
-  in-progress. Middle- or right-click forces an immediate refresh.
+- **Click the widget for a timeline of the rest of your day** — a popup that
+  lays every remaining meeting out against an hourly scale, so a block's
+  height *is* its duration and the empty space between blocks *is* your free
+  time. Overlapping meetings sit side by side in their own columns, a red
+  rule marks where "now" falls, and anything already running is highlighted
+  as in-progress. Middle- or right-click forces an immediate refresh.
 - Two independent, auto-selected backends:
   - **Published ICS calendar link** (recommended) — a plain HTTPS fetch, no
     sign-in at all. Works even when your organization's Conditional Access
@@ -163,14 +165,19 @@ override the default client in `config.json`:
 | Action | Result |
 | --- | --- |
 | Hover | Tooltip with the next meeting's full title and time. |
-| Left click | Opens **today's remaining agenda** — every meeting left today with its full title, clock times, and time until it starts. Click again to close. |
+| Left click | Opens **today's remaining day as a timeline** — an hourly scale with every meeting drawn as a block whose height matches its real length, so gaps and back-to-backs are obvious at a glance. Overlapping meetings share the track in side-by-side columns, and a red rule shows where you are right now. Click again to close. |
 | Left click (signed out) | Opens a terminal for device-code sign-in instead. |
 | Middle / right click | Forces an immediate refresh. |
 
+The timeline scales itself to whatever is left of your day: a normal
+afternoon fits without scrolling, while a long day compresses to a minimum
+hour height and scrolls instead. Meetings shorter than the minimum block
+height still get a readable block, so a 15-minute sync never disappears.
+
 The agenda comes down in the same poll as the countdown, so opening it costs
 no extra work and no extra network request. Both the countdown and the
-agenda are recomputed every 15s, so meetings drop off the list as they end,
-without waiting for the next poll.
+timeline are recomputed every 15s, so meetings drop off as they end and the
+"now" marker keeps sliding, without waiting for the next poll.
 
 ## Security posture
 
@@ -239,8 +246,10 @@ it if you plan to reinstall later.)
 - `BarWidget.qml` — the bar widget itself: polls the backend script every 20
   minutes via `Quickshell.Io.Process` (under a `timeout` wrapper and a QML
   watchdog), recomputes the on-screen countdown and today's agenda every
-  15s, draws the click-through agenda popup, and watches `config.json` for
-  instant refresh on change.
+  15s, lays that agenda out as a proportional day timeline (hour grid,
+  duration-scaled blocks, column packing for overlaps, a live "now" rule)
+  in the click-through popup, and watches `config.json` for instant refresh
+  on change.
 - `bin/get_next_meeting.py` — non-interactive poll script. Always exits 0
   and prints exactly one JSON line so the widget never has to handle a
   crash. Auto-selects the ICS or Graph backend based on `config.json`, and
