@@ -174,6 +174,7 @@ override the default client in `config.json`:
 | Scroll (timeline) | Moves through the day. It opens centred on "now"; scroll up for the morning, down for the evening. |
 | Left click (signed out) | Opens a terminal for device-code sign-in instead. |
 | Middle / right click | Forces an immediate refresh. |
+| Keyboard shortcut | Toggles the timeline. Not bound by default — see [Binding a keyboard shortcut](#binding-a-keyboard-shortcut). |
 
 The timeline covers the full calendar day, midnight to midnight, at a fixed
 scale — so 9AM is always the same distance from 10AM, and a block's height
@@ -194,6 +195,23 @@ no extra work and no extra network request. Both the countdown and the
 timeline are recomputed every 15s, so meetings move from upcoming to ended
 as the day goes on and the "now" marker keeps sliding, without waiting for
 the next poll.
+
+### Binding a keyboard shortcut
+
+Toggle the timeline from a hotkey by adding this to
+`~/.config/hypr/bindings.lua`:
+
+```lua
+hl.unbind("SUPER + SHIFT + S") -- only if the key is already taken
+o.bind("SUPER + SHIFT + S", "Next meeting schedule",
+  "omarchy shell -q shell toggle craig.next-meeting")
+```
+
+Use any key you like. Check whether it's already bound first with
+`omarchy menu keybindings --print`; if it is, keep the `hl.unbind` line, since
+otherwise the existing binding wins. Hyprland reloads on save.
+
+The widget must be on your bar for the toggle to work.
 
 ## Security posture
 

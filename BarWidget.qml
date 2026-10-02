@@ -94,7 +94,21 @@ BarWidget {
   property bool aborting: false
   property string abortReason: ""
 
+  // Bar.findPanelWidget() only treats a widget as hotkey-addressable when it
+  // exposes all three of open(), close() and `opened`; miss one and
+  // `omarchy shell toggle craig.next-meeting` silently does nothing.
+  readonly property bool opened: popupOpen
+
+  function open() {
+    popupOpen = true
+    // Opening the day's agenda is exactly when a stale answer is most
+    // annoying, so top it up if the last poll is getting old.
+    if (Date.now() - lastUpdatedMs > stalenessMs) refresh()
+  }
+
   function close() { popupOpen = false }
+
+  function toggle() { opened ? close() : open() }
 
   // ------------------------------------------------------------------
   // Redaction
@@ -684,10 +698,7 @@ BarWidget {
         )
         return
       }
-      root.popupOpen = !root.popupOpen
-      // Opening the day's agenda is exactly when a stale answer is most
-      // annoying, so top it up if the last poll is getting old.
-      if (root.popupOpen && Date.now() - root.lastUpdatedMs > root.stalenessMs) root.refresh()
+      root.toggle()
     }
     onEntered: if (root.bar) root.bar.showTooltip(root, root.tooltipText)
     onExited: if (root.bar) root.bar.hideTooltip(root)
