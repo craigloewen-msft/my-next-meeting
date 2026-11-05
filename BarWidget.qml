@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Bar widget: countdown to the next Outlook/Microsoft 365 calendar meeting,
@@ -670,7 +671,7 @@ BarWidget {
       anchors.centerIn: parent
       textFormat: Text.PlainText
       text: root.displayText
-      color: root.bar ? root.bar.barForeground : Color.foreground
+      color: root.bar ? root.bar.barForeground : Commons.Color.foreground
       font.family: root.bar ? root.bar.fontFamily : Style.font.family
       font.pixelSize: Style.font.body
       elide: Text.ElideRight
@@ -717,11 +718,11 @@ BarWidget {
     contentWidth: popup.fittedContentWidth(Style.space(400))
     contentHeight: popup.fittedContentHeight(column.implicitHeight)
 
-    readonly property color fg: root.bar ? root.bar.foreground : Color.foreground
-    readonly property color accent: Color.accent
-    readonly property color urgent: root.bar ? root.bar.urgent : Color.urgent
-    readonly property color dim: root.bar ? Qt.darker(root.bar.foreground, 1.4) : Color.foreground
-    readonly property color surface: Color.popups.background
+    readonly property color fg: root.bar ? root.bar.foreground : Commons.Color.foreground
+    readonly property color accent: Commons.Color.accent
+    readonly property color urgent: root.bar ? root.bar.urgent : Commons.Color.urgent
+    readonly property color dim: root.bar ? Qt.darker(root.bar.foreground, 1.4) : Commons.Color.foreground
+    readonly property color surface: Commons.Color.popups.background
     readonly property string face: root.bar ? root.bar.fontFamily : Style.font.family
 
     // Width of the hour-label column. Sized from the widest label the locale
@@ -749,7 +750,7 @@ BarWidget {
           anchors.verticalCenter: parent.verticalCenter
           textFormat: Text.PlainText
           text: "Today"
-          color: root.bar ? root.bar.foreground : Color.foreground
+          color: root.bar ? root.bar.foreground : Commons.Color.foreground
           font.family: popup.face
           font.pixelSize: Style.font.subtitle
           font.bold: true
@@ -1225,7 +1226,7 @@ BarWidget {
           anchors.verticalCenter: parent.verticalCenter
           text: "Refresh"
           iconText: "󰑐"
-          foreground: root.bar ? root.bar.foreground : Color.foreground
+          foreground: root.bar ? root.bar.foreground : Commons.Color.foreground
           fontSize: Style.font.bodySmall
           enabled: !pollProc.running
           opacity: enabled ? 1.0 : 0.5
